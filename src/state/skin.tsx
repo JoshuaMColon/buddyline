@@ -1,3 +1,6 @@
+// Paint from localStorage first so the first frame matches theme-init.js.
+// Accounts then pull chat.settings. Guests never write a row: their skin
+// stays on this device and expires with the browser profile.
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { supabase } from '../lib/supabase'
 import { DEFAULT_DARK, DEFAULT_LIGHT, paintCache, presetById, resolveSkin, sanitizeSkin, skinAttrs, fontPx, switchPreset, type Resolved, type Skin } from '../lib/skins'
@@ -47,8 +50,10 @@ export function SkinProvider({ children }: { children: ReactNode }) {
   const [sync, setSync] = useState<SkinState['sync']>('local')
   const resolved = useMemo(() => resolveSkin(skin), [skin])
   const uid = session && !isGuest ? session.user.id : null
-  // The account's saved skin has been read (so local edits may now be written back).
+  // Set once the remote row has been read. Until then I won't write,
+  // or a slow fetch would overwrite a skin they just picked.
   const pulled = useRef<string | null>(null)
+  // This device has a change the server hasn't stored yet.
   const dirty = useRef(false)
 
   useLayoutEffect(() => {
@@ -77,6 +82,8 @@ export function SkinProvider({ children }: { children: ReactNode }) {
         setSkinState(remote)
         setSync('synced')
       } else {
+        // No saved skin, or they edited while the fetch was in flight.
+        // Push what this device already has.
         dirty.current = true
         setSkinState((s) => ({ ...s }))
       }

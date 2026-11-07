@@ -1,8 +1,10 @@
+// Pure message and room helpers. No React and no Supabase client, so
+// the tests can run merge, unread, and file rules without a network.
 import type { Member, Message, Reactions, RoomSummary } from './types'
 
 /* ------------------------------------------------------------------ timestamps */
 
-/** PostgREST and Realtime format timestamps differently; normalise to ms ISO so strings compare. */
+/** PostgREST and Realtime format timestamps differently. I force both through Date so "+00" and "Z" compare equal. */
 export function iso(t: string | null | undefined): string {
   return t ? new Date(t).toISOString() : (t as unknown as string)
 }
@@ -23,7 +25,11 @@ export function normMember(m: Member): Member {
 export function normRoom(r: RoomSummary): RoomSummary {
   return { ...r, last_message_at: iso(r.last_message_at), last_read_at: iso(r.last_read_at) }
 }
-/** Read marker for a message: 1 ms past it, since server times have microseconds. */
+/**
+ * Read marker for a message. The server stores microseconds and JS dates
+ * stop at milliseconds, so I mark it read 1 ms past the message. That
+ * keeps last_read_at strictly after created_at.
+ */
 export function readMark(m: Pick<Message, 'created_at'>) {
   return new Date(+new Date(m.created_at) + 1).toISOString()
 }
@@ -35,9 +41,10 @@ export function byTime(a: Pick<Message, 'created_at' | 'id'>, b: Pick<Message, '
 }
 
 /**
- * Merge server rows into the local list. Rows are keyed by id, and ids are generated on the client
- * for sends, so the realtime echo of an optimistic message replaces it instead of duplicating it.
- * A local image preview is kept until the signed URL takes over.
+ * Merge server rows into the local list. I key rows by id, and sends
+ * generate that id on the client, so the realtime echo of an optimistic
+ * message replaces it instead of duplicating it. A local image preview
+ * stays until the signed URL takes over.
  */
 export function mergeMessages(list: Message[], incoming: Message[]): Message[] {
   if (!incoming.length) return list
@@ -187,6 +194,11 @@ export function isImage(mime: string) {
   return IMAGE_TYPES.includes(mime)
 }
 
+/**
+ * Storage keys are part of the authorization path (<room>/<me>/<file>).
+ * I drop directories, accents, and odd characters so the name is one
+ * path segment the upload policy will accept.
+ */
 export function safeFileName(raw: string) {
   const name = raw.split(/[\\/]/).pop() ?? ''
   const dot = name.lastIndexOf('.')
@@ -208,6 +220,7 @@ export function safeFileName(raw: string) {
   return ext ? `${stem}.${ext}` : stem
 }
 
+/** Must match the upload policy and the message trigger: <room>/<user>/<file>. */
 export function storagePath(room: string, user: string, id: string, name: string) {
   return `${room}/${user}/${id}-${safeFileName(name)}`
 }
@@ -234,7 +247,11 @@ export function isUuid(s: string | null | undefined): s is string {
   return !!s && UUID.test(s)
 }
 
-/** Realtime topic for a room's private typing channel (mirrors chat.can_use_topic in SQL). */
+/**
+ * Realtime topic for a room's private typing channel. The string has to
+ * match chat.can_use_topic in SQL. I refuse a non-uuid here so a bad id
+ * can't be turned into a channel name the policy would still try to parse.
+ */
 export function roomTopic(roomId: string) {
   if (!isUuid(roomId)) throw new Error('Bad room id')
   return `chat:room:${roomId}`

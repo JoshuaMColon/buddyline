@@ -1,3 +1,6 @@
+// Rows from the public.chat_* views and the buddy/room RPCs. Anything
+// the database never stores (pending, failed, localUrl) is client-only
+// and gets stripped before an insert.
 export interface Profile {
   id: string
   display_name: string
@@ -6,6 +9,8 @@ export interface Profile {
   is_bot: boolean
   is_guest: boolean
   created_at: string
+  // Persisted presence. The lobby channel can override these while the
+  // person is signed on; buddyLive decides which source wins.
   status?: 'online' | 'away'
   away_message?: string | null
   away_since?: string | null
@@ -22,6 +27,7 @@ export interface Attachment {
   h?: number
 }
 
+/** emoji -> user ids. Written only by chat_toggle_reaction, never by a message update. */
 export type Reactions = Record<string, string[]>
 
 export interface Message {

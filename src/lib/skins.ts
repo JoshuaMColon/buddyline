@@ -339,7 +339,11 @@ export interface Skin extends Partial<Look> {
 const HEX = /^#[0-9a-f]{6}$/i
 const oneOf = <T extends readonly { id: string }[]>(list: T, v: unknown): Ids<T> | undefined => (list.some((o) => o.id === v) ? (v as Ids<T>) : undefined)
 
-/** Accept anything (localStorage, the database, a URL) and keep only safe, known values. */
+/**
+ * Accept anything (localStorage, the database) and keep only known
+ * values. The database runs the same idea in chat.clean_skin; I do it
+ * again here so a bad localStorage blob can't paint the page.
+ */
 export function sanitizeSkin(raw: unknown): Skin | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
@@ -368,7 +372,7 @@ export function resolveLook(skin: Skin): Look {
   return out
 }
 
-/** Store only what differs from the preset, so presets can improve later without stomping choices. */
+/** Store only what differs from the preset, so a later preset tweak doesn't stomp a choice they never made. */
 export function withChange(skin: Skin, change: Partial<Look>): Skin {
   const p = presetById(skin.preset).look
   const next: Skin = { ...skin, ...change }
