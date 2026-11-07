@@ -1,3 +1,8 @@
+// Three routes, no data router. I push history myself and notify every
+// useLocation through a listener set, which covers /, /login, /demo and
+// /app/r/:id. `replace` is for auth redirects so Back doesn't bounce
+// between /login and /app. The host rewrites every path except /assets
+// to index.html, so a refresh on an IM url still boots this file.
 import { useEffect, useState } from 'react'
 
 const listeners = new Set<() => void>()

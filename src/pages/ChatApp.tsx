@@ -243,6 +243,9 @@ function Shell() {
 
 export function ChatApp({ roomId }: { roomId: string | null }) {
   const { ready, session, profile, profileError, signOut } = useAuth()
+  // The route itself is public. The gate is here: no session means
+  // /login, and I don't mount chat, buddy, or window state until the
+  // profile row exists. Guests and accounts take the same path.
   useEffect(() => {
     if (ready && !session) navigate('/login', true)
   }, [ready, session])
@@ -259,6 +262,7 @@ export function ChatApp({ roomId }: { roomId: string | null }) {
   return (
     <ChatProvider db={supabase} me={profile}>
       <BuddyProvider>
+        {/* A junk /app/r/<not-a-uuid> must not become a channel name. */}
         <WindowProvider roomId={isUuid(roomId) ? roomId : null}>
           <Shell />
         </WindowProvider>
