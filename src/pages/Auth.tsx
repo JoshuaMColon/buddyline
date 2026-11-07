@@ -24,6 +24,7 @@ function Frame({ children }: { children: React.ReactNode }) {
 export function Login() {
   const { session, isGuest } = useAuth()
   const { search } = useLocation()
+  // /login?mode=signup opens the create-account tab. The guest banner links here.
   const [mode, setMode] = useState<'in' | 'up'>(() => (new URLSearchParams(search).get('mode') === 'signup' ? 'up' : 'in'))
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -31,6 +32,9 @@ export function Login() {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ tone: 'good' | 'bad'; text: string } | null>(null)
 
+  // A real account already signed in doesn't belong on this form.
+  // Guests stay: this page is how they claim a screen name, and their
+  // guest session is a different user.
   useEffect(() => {
     if (session && !isGuest) navigate('/app', true)
   }, [session, isGuest])
@@ -41,12 +45,25 @@ export function Login() {
     setBusy(true)
     setMsg(null)
     try {
+      // Anonymous users aren't upgraded in place. I sign the guest out
+      // first so email and password create a separate account. Guest IMs
+      // and buddies stay on the anonymous user and expire with it.
       if (isGuest) await supabase.auth.signOut()
       if (mode === 'up') {
         const bad = name.trim() ? screenNameError(name) : null
         if (bad) throw new Error(bad)
-        const { data, error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: `${location.origin}/app`, data: { display_name: name.trim() || undefined } } })
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password,
+          options: {
+            emailRedirectTo: `${location.origin}/app`,
+            // chat_ensure_profile reads this on first sign-in. A blank
+            // name falls through to the email local-part.
+            data: { display_name: name.trim() || undefined },
+          },
+        })
         if (error) throw error
+        // Confirm-email is on when Supabase returns a user and no session.
         if (!data.session) setMsg({ tone: 'good', text: 'Almost there: open the confirmation link we just emailed you, then sign in.' })
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password })
