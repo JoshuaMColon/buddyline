@@ -1,3 +1,6 @@
+// The whole data API. The SPA talks to PostgREST views (security invoker,
+// so RLS still applies) and to RPCs for anything that touches more than
+// one row. There is no app server in between.
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { normMember, normMessage, normRoom, storagePath } from './logic'
 import type { Attachment, BuddyListData, Member, Message, Profile, PublicRoom, Reactions, RoomSummary } from './types'
@@ -6,10 +9,13 @@ export const PAGE = 40
 const BUCKET = 'chat-files'
 
 function check<T>(r: { data: T | null; error: { message: string } | null }): T {
+  // PostgREST puts failures on `error` and still resolves the promise.
+  // I throw so callers can use try/catch like a normal request.
   if (r.error) throw new Error(r.error.message)
   return r.data as T
 }
 
+/** First sign-in: create the profile, join the seed rooms, seed the buddy list, open Pip's IM. */
 export async function ensureProfile(db: SupabaseClient, name?: string | null): Promise<Profile> {
   return check(await db.rpc('chat_ensure_profile', { p_name: name ?? null })) as Profile
 }
@@ -32,6 +38,7 @@ export async function openDm(db: SupabaseClient, other: string): Promise<string>
 
 export async function joinRoom(db: SupabaseClient, room: string, me: string) {
   const r = await db.from('chat_members').insert({ room_id: room, user_id: me })
+  // 23505 is unique_violation: already a member. Joining twice is fine.
   if (r.error && r.error.code !== '23505') throw new Error(r.error.message)
 }
 
@@ -46,6 +53,7 @@ export async function getProfiles(db: SupabaseClient, ids: string[]): Promise<Pr
 
 export async function searchPeople(db: SupabaseClient, q: string, me: string): Promise<Profile[]> {
   let query = db.from('chat_profiles').select('*').neq('id', me).order('is_bot', { ascending: false }).order('created_at', { ascending: false }).limit(30)
+  // Strip LIKE wildcards and filter punctuation so a search for "%" doesn't match everyone.
   const t = q.trim().replace(/[%_,()]/g, '')
   if (t) query = query.ilike('display_name', `%${t}%`)
   return check(await query) ?? []
@@ -59,7 +67,11 @@ export async function members(db: SupabaseClient, room: string): Promise<Member[
   return ((check(await db.from('chat_members').select('*').eq('room_id', room).limit(500)) ?? []) as Member[]).map(normMember)
 }
 
-/** Newest page, or the page before `before` (keyset on created_at, id). Returned oldest first. */
+/**
+ * Newest page, or the page before `before`. Keyset on (created_at, id)
+ * so a new message at the bottom doesn't shift the next page. I reverse
+ * the page so the caller gets oldest-first.
+ */
 export async function messages(db: SupabaseClient, room: string, before?: Pick<Message, 'created_at' | 'id'>): Promise<Message[]> {
   let q = db.from('chat_messages').select('*').eq('room_id', room).order('created_at', { ascending: false }).order('id', { ascending: false }).limit(PAGE)
   if (before) q = q.or(`created_at.lt."${before.created_at}",and(created_at.eq."${before.created_at}",id.lt.${before.id})`)
@@ -69,6 +81,8 @@ export async function messages(db: SupabaseClient, room: string, before?: Pick<M
 
 export async function sendMessage(db: SupabaseClient, m: Pick<Message, 'id' | 'room_id' | 'user_id' | 'body' | 'attachment' | 'style' | 'kind'>): Promise<Message> {
   const row: Record<string, unknown> = { id: m.id, room_id: m.room_id, user_id: m.user_id, body: m.body, attachment: m.attachment }
+  // The column grants only allow these fields. kind defaults to text in
+  // the database; I send it for a buzz and never send 'away' (the trigger rejects that).
   if (m.style) row.style = m.style
   if (m.kind && m.kind !== 'text') row.kind = m.kind
   return normMessage(check(await db.from('chat_messages').insert(row).select('*').single()))
@@ -76,6 +90,7 @@ export async function sendMessage(db: SupabaseClient, m: Pick<Message, 'id' | 'r
 
 /* ------------------------------------------------------------------ status + buddy list */
 
+/** The only way to change status. A trigger blocks writing those columns on the profile directly. */
 export async function setPresence(db: SupabaseClient, status: 'online' | 'away', away: string | null, idle: boolean): Promise<Profile> {
   return check(await db.rpc('chat_set_presence', { p_status: status, p_away_message: away, p_idle: idle })) as Profile
 }
@@ -118,6 +133,8 @@ export async function editMessage(db: SupabaseClient, id: string, body: string):
 }
 
 export async function deleteMessage(db: SupabaseClient, m: Message): Promise<Message> {
+  // Soft delete. The trigger blanks the body and attachment. I also
+  // remove the object so the private file doesn't outlive the message.
   const row = check(await db.from('chat_messages').update({ deleted_at: new Date().toISOString() }).eq('id', m.id).select('*').single()) as Message
   if (m.attachment) await db.storage.from(BUCKET).remove([m.attachment.path])
   return normMessage(row)
@@ -139,7 +156,10 @@ export async function uploadFile(db: SupabaseClient, room: string, me: string, f
 
 const signed = new Map<string, { url: string; exp: number }>()
 
-/** Short-lived signed URL for a private file, cached until shortly before it expires. */
+/**
+ * The bucket is private. I sign for an hour and reuse the URL until it's
+ * close to expiry, so scrolling a room of images doesn't re-sign each one.
+ */
 export async function fileUrl(db: SupabaseClient, path: string, download?: string): Promise<string> {
   const key = download ? `${path}#dl` : path
   const hit = signed.get(key)
