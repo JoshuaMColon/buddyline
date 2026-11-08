@@ -21,6 +21,7 @@ revoke all on chat.settings from public, anon;
 grant select, insert (user_id, skin, updated_at), update (skin, updated_at) on chat.settings to authenticated;
 
 -- Keep only known keys with safe values: colors are #rrggbb, choices are short slugs, numbers are bounded.
+-- The client sanitizes too (sanitizeSkin). This is the copy I trust, because localStorage is not.
 create or replace function chat.clean_skin(s jsonb)
 returns jsonb language sql immutable set search_path = '' as $$
   select coalesce(jsonb_object_agg(k, v), '{}'::jsonb) from jsonb_each(coalesce(s, '{}'::jsonb)) as e(k, v)
@@ -32,7 +33,8 @@ $$;
 revoke execute on function chat.clean_skin(jsonb) from public, anon;
 grant execute on function chat.clean_skin(jsonb) to authenticated;
 
--- Invoker functions: RLS on chat.settings decides what each caller can touch.
+-- Invoker on purpose. RLS already limits the row to auth.uid(), and
+-- clean_skin drops unknown keys. I don't need to bypass RLS to save a skin.
 create or replace function public.chat_my_skin()
 returns jsonb language sql stable security invoker set search_path = '' as $$
   select skin from chat.settings where user_id = (select auth.uid())
@@ -48,6 +50,9 @@ revoke execute on function public.chat_my_skin(), public.chat_save_skin(jsonb) f
 grant execute on function public.chat_my_skin(), public.chat_save_skin(jsonb) to authenticated;
 
 -- ---------------------------------------------------------------- away auto-response: %n is the person who IMed
+-- %n is filled in here with the sender's screen name. The away person
+-- never sees their own name substituted into the message they wrote.
+-- Older rows that still contain %n are expanded in the client for the reader.
 create or replace function chat.away_reply(m chat.messages)
 returns void language plpgsql security definer set search_path = '' as $$
 declare

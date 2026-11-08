@@ -20,6 +20,10 @@ update chat.profiles set display_name = 'TeoShipsFriday', bio = 'Ships things on
 update chat.profiles set display_name = 'HanaClicks', bio = 'Photographer, mostly of mailboxes and sunsets.', idle_since = now() - interval '17 minutes' where id = 'a0e70000-0000-4000-8000-000000000004';
 create unique index profiles_screen_name_key on chat.profiles (lower(display_name));
 
+-- Direct updates can change the screen name and bio. Status, away, idle,
+-- and last-seen stay put here; chat_set_presence is the only writer.
+-- That keeps a client from marking itself online, or from resetting
+-- away_since to earn another auto-reply.
 create or replace function chat.guard_profile()
 returns trigger language plpgsql set search_path = '' as $$
 begin
@@ -57,6 +61,9 @@ create table chat.buddies (
 create index buddies_group on chat.buddies (group_id);
 create index buddies_buddy on chat.buddies (buddy);
 
+-- The list is private. Select only: every mutation goes through an RPC
+-- that checks owner = auth.uid(). No insert, update, or delete policy,
+-- so the Data API cannot write these tables directly.
 alter table chat.buddy_groups enable row level security;
 alter table chat.buddies enable row level security;
 create policy buddy_groups_own on chat.buddy_groups for select to authenticated using (owner = (select auth.uid()));
@@ -70,7 +77,9 @@ create table chat.away_replies (
   away_since timestamptz not null,
   primary key (user_id, sender, away_since)
 );
-alter table chat.away_replies enable row level security; -- no policies: definer functions only
+-- RLS on, and no policies. Only away_reply (security definer) writes this,
+-- so a client cannot delete its row and get a second auto-response.
+alter table chat.away_replies enable row level security;
 
 -- ---------------------------------------------------------------- messages: formatting, buzz, auto-replies
 alter table chat.messages
@@ -78,6 +87,7 @@ alter table chat.messages
   add column kind text not null default 'text' check (kind in ('text', 'buzz', 'away'));
 
 -- Whole-message formatting from the toolbar: bold/italic/underline, a named color, a size.
+-- I store a small JSON object, never HTML. Anything outside this allow-list is dropped.
 create or replace function chat.clean_style(s jsonb)
 returns jsonb language sql immutable set search_path = '' as $$
   select nullif(jsonb_strip_nulls(jsonb_build_object(
@@ -89,6 +99,9 @@ returns jsonb language sql immutable set search_path = '' as $$
   )), '{}'::jsonb)
 $$;
 
+-- Replaces the guard from the first migration. Clients may send text or
+-- buzz. kind = 'away' is rejected here; only the away_reply trigger,
+-- running as the definer, can insert one.
 create or replace function chat.guard_message()
 returns trigger language plpgsql set search_path = '' as $$
 declare
@@ -162,7 +175,9 @@ begin
   return new;
 end $$;
 
--- Away auto-reply: when someone IMs a person who is away, send their away message back once per away session.
+-- When someone IMs a person who is away, send the away message back once
+-- per away spell. The insert into away_replies is the lock: ON CONFLICT
+-- DO NOTHING, and `if not found` means this sender already got one.
 create or replace function chat.away_reply(m chat.messages)
 returns void language plpgsql security definer set search_path = '' as $$
 declare
@@ -333,6 +348,9 @@ begin
 end $$;
 
 -- ---------------------------------------------------------------- RPCs: presence, away presets, buddy list
+-- away_since is the away spell. I leave it alone when they save the same
+-- message again, so the auto-reply still fires once per spell instead of
+-- once per save. Going online clears away_since (the CASE yields null).
 create or replace function public.chat_set_presence(p_status text, p_away_message text default null, p_idle boolean default false)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
@@ -394,6 +412,8 @@ returns uuid language sql stable set search_path = '' as $$
     (select id from chat.buddy_groups where owner = uid order by sort, created_at limit 1))
 $$;
 
+-- Look up by screen name, case-insensitive. p_group is ignored unless
+-- that group belongs to the caller; own_group falls back to their first group.
 create or replace function public.chat_add_buddy(p_screen_name text, p_group uuid default null)
 returns uuid language plpgsql security definer set search_path = '' as $$
 declare
