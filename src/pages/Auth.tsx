@@ -179,25 +179,34 @@ export function Login() {
   )
 }
 
+// One in-flight anonymous sign-in for this page. StrictMode mounts the
+// effect twice; sharing the promise means one guest, not two. I clear it
+// when the call settles so the next visit (after a sign-off) starts fresh.
 let demoStart: ReturnType<NonNullable<typeof supabase>['auth']['signInAnonymously']> | null = null
 
 /** After this long without a guest session the page offers a retry instead of a silent spinner. */
 export const DEMO_SLOW_MS = 8000
 
 function demoErrorText(error: { message: string; status?: number; code?: string }) {
+  // Supabase rate-limits anonymous sign-in. The raw message is not something I want on this screen.
   if (error.status === 429 || error.code === 'over_request_rate_limit') return 'Lots of people are trying the demo right now. Please try again in a minute.'
   if (/fetch|network|load failed/i.test(error.message)) return 'Couldn’t reach Buddyline. Check your connection and try again.'
   return error.message
 }
 
+/**
+ * /demo. Anonymous sign-in is a real Supabase user with is_anonymous set.
+ * A scheduled job deletes those users after a day; profile, messages, and
+ * files cascade with them. Nothing here is copied onto a later account.
+ */
 export function Demo() {
   const { session, ready } = useAuth()
   const [err, setErr] = useState<string | null>(supabase ? null : 'This build has no Supabase configuration.')
   const [slow, setSlow] = useState(false)
   const [attempt, setAttempt] = useState(0)
 
-  // A guest that takes too long (slow mobile data, or an in-app browser that froze the tab
-  // in the background) gets a visible way out instead of an endless "Picking…" screen.
+  // Slow mobile data, or an in-app browser that froze the tab, used to
+  // sit on "Picking…" forever. After DEMO_SLOW_MS I offer a retry.
   useEffect(() => {
     const t = setTimeout(() => setSlow(true), DEMO_SLOW_MS)
     return () => clearTimeout(t)
@@ -205,10 +214,9 @@ export function Demo() {
 
   useEffect(() => {
     if (!supabase || !ready) return
+    // Already signed in (guest or account). The messenger is the destination.
     if (session) return navigate('/app', true)
     let live = true
-    // Shared so a StrictMode double-run makes one guest, but cleared once it settles:
-    // after a sign-off, the next visit to /demo has to start a fresh guest.
     const start = (demoStart ??= supabase.auth.signInAnonymously())
     start
       .then(({ error }) => {
@@ -219,7 +227,8 @@ export function Demo() {
         if (demoStart === start) demoStart = null
         if (live) setErr(demoErrorText(e))
       })
-    // Coming back to a tab the browser paused: pick up a session that landed meanwhile.
+    // A tab frozen in an in-app browser can miss the auth event. When it
+    // becomes visible again I check getSession and continue if the guest landed.
     const db = supabase
     const resume = () => {
       if (document.visibilityState !== 'visible') return
@@ -237,6 +246,7 @@ export function Demo() {
   }, [session, ready, attempt])
 
   function retry() {
+    // Drop the shared promise so this click actually starts a new guest.
     demoStart = null
     setErr(null)
     setSlow(false)
