@@ -531,9 +531,9 @@ create policy "Aerogram: members upload to their room folder" on storage.objects
 create policy "Aerogram: authors delete their files" on storage.objects for delete to authenticated
   using (bucket_id = 'chat-files' and owner_id = (select auth.uid())::text);
 
--- The hourly sweep outside this migration removes files through this list.
--- I include chat files whose owner is gone, whose anonymous user is almost
--- a day old, or that no message still points at.
+-- The hourly cleanup-demo-files sweep (it lives outside this migration)
+-- removes files through this list. I include chat files whose owner is
+-- gone, whose anonymous user is almost a day old, or that no message still points at.
 create or replace function public.demo_files_to_purge(max_rows integer default 500)
 returns table (bucket_id text, name text)
 language sql stable security definer set search_path = '' as $$

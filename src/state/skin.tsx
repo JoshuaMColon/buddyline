@@ -1,6 +1,6 @@
 // Paint from localStorage first so the first frame matches theme-init.js.
 // Accounts then pull chat.settings. Guests never write a row: their skin
-// stays on this device and expires with the browser profile.
+// stays in localStorage on this device.
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { supabase } from '../lib/supabase'
 import { DEFAULT_DARK, DEFAULT_LIGHT, paintCache, presetById, resolveSkin, sanitizeSkin, skinAttrs, fontPx, switchPreset, type Resolved, type Skin } from '../lib/skins'
