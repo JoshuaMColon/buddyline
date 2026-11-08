@@ -1,3 +1,6 @@
+// Live state for one signed-in user: room list, profiles, presence, and
+// my away/idle. Each RoomView owns its messages. This provider only
+// fans Postgres changes out as ChatEvents.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { RealtimeChannel, SupabaseClient } from '@supabase/supabase-js'
 import * as api from '../lib/api'
@@ -82,6 +85,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
       }
       if (!added) return
       window.clearTimeout(flushTimer.current)
+      // A room load and a burst of messages would otherwise fire one
+      // profile request per id. I wait a tick and batch them.
       flushTimer.current = window.setTimeout(async () => {
         const batch = [...pending.current]
         pending.current.clear()
@@ -105,6 +110,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     try {
       const list = await api.myRooms(db)
       const open = openRef.current
+      // An open window is already on screen. The server's unread count
+      // would flash a badge I just cleared.
       setRooms(list.map((r) => (open.has(r.id) ? { ...r, unread: 0 } : r)))
       setRoomsLoaded(true)
       ensureProfiles(list.flatMap((r) => [r.dm_user ?? '', r.last_user ?? '']))
@@ -134,13 +141,16 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     refreshRooms()
   }, [refreshRooms])
 
-  // One Postgres-changes channel for everything I can see; RLS filters the events server-side.
+  // One Postgres-changes channel for everything I can see. RLS filters
+  // the events server-side, so I don't subscribe per room.
   useEffect(() => {
     let first = true
     const ch: RealtimeChannel = db
       .channel(`chat-db:${me.id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'chat', table: 'messages' }, (p) => {
         const m = normMessage(p.new as Message)
+        // A room I haven't listed yet (usually a brand-new DM). Reload
+        // instead of bumping a row that isn't there.
         if (!roomsRef.current.some((r) => r.id === m.room_id)) refreshSoon()
         else setRooms((rs) => bumpRoom(rs, m, me.id, openRef.current))
         ensureProfiles([m.user_id])
@@ -168,6 +178,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
         if (s === 'SUBSCRIBED') {
           setStatus('live')
           if (!first) {
+            // Reconnect: the gap may have dropped events. Reload rooms
+            // and tell each open window to refetch its history.
             refreshRooms()
             emit({ type: 'resync' })
           }
@@ -179,8 +191,9 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     }
   }, [db, me.id, emit, ensureProfiles, refreshRooms, refreshSoon])
 
-  // Global presence: who is signed on anywhere in Buddyline (private channel, RLS on realtime.messages).
-  // Meta carries status, away message and idle time so buddy lists update live.
+  // Who is signed on anywhere in Buddyline. Private channel; RLS on
+  // realtime.messages only lets a signed-in user join chat:lobby. The
+  // meta carries status, away message, and idle time so buddy lists update live.
   const lobby = useRef<RealtimeChannel | null>(null)
   const meta = useRef<PresenceMeta | null>(null)
   useEffect(() => {
@@ -205,7 +218,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
         const state = ch!.presenceState<PresenceMeta>()
         const next: Record<string, PresenceMeta> = {}
         for (const [id, metas] of Object.entries(state)) {
-          // Several tabs: the most "present" one wins (online beats idle beats away).
+          // Several tabs of the same person. The most "here" one wins:
+          // online beats idle, idle beats away. score() sorts that.
           const best = [...metas].sort((a, b) => score(a) - score(b))[0]
           if (best) next[id] = { ...best, user_id: id }
         }
@@ -224,7 +238,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     }
   }, [db, me.id])
 
-  // Persist status so people who sign on later (and the away auto-reply) see it.
+  // Presence is ephemeral. I also write status to the profile so someone
+  // who signs on later, and the away auto-reply trigger, can see it.
   const persist = useCallback(
     (status: 'online' | 'away', msg: string | null, idle: boolean) =>
       api
@@ -251,7 +266,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     [persist],
   )
 
-  // Idle: no pointer/keyboard/touch activity for a few minutes (or the tab hidden that long).
+  // Idle after a few minutes with no pointer, keyboard, or touch, or
+  // with the tab hidden that long. Away still wins over idle in buddyLive.
   useEffect(() => {
     let last = Date.now()
     const active = () => {
@@ -272,6 +288,7 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     }
     const evs = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const
     let moveT = 0
+    // pointermove fires constantly. I only count it every 2s so idle detection stays cheap.
     const move = () => {
       const now = Date.now()
       if (now - moveT > 2000) {
@@ -284,7 +301,8 @@ export function ChatProvider({ db, me, children }: { db: SupabaseClient; me: Pro
     const vis = () => document.visibilityState === 'visible' && active()
     document.addEventListener('visibilitychange', vis)
     const t = window.setInterval(check, 20_000)
-    // Heartbeat keeps "last seen" fresh and clears a stale idle flag from a previous session.
+    // Heartbeat keeps last_seen_at moving and clears a stale idle flag
+    // left by a tab that died without signing off.
     persist(awayRef.current !== null ? 'away' : 'online', awayRef.current, false)
     const hb = window.setInterval(() => persist(awayRef.current !== null ? 'away' : 'online', awayRef.current, !!idleRef.current), 120_000)
     return () => {
@@ -340,5 +358,6 @@ export function roomTitle(r: Pick<RoomSummary, 'kind' | 'name' | 'dm_user'>, pro
 }
 
 function score(m: PresenceMeta) {
+  // Lower is more present. Used when several tabs share one user id.
   return (m.status === 'away' ? 2 : 0) + (m.idle_since ? 1 : 0)
 }
