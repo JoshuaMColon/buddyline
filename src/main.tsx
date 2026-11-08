@@ -9,6 +9,9 @@ import { SkinPanel } from './components/SkinPanel'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    {/* Auth wraps the tree because the skin sync and the messenger both
+        read the session. Skin sits outside chat so the landing page can
+        theme itself before anyone signs in. */}
     <AuthProvider>
       <SkinProvider>
         <ToastProvider>

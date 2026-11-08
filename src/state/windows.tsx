@@ -1,3 +1,6 @@
+// Desktop IM windows. Positions live in localStorage per user, not in
+// Postgres: they're a layout preference, and a guest's machine is the
+// only place that layout matters.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as api from '../lib/api'
 import { cascade, clampBox, type WinBox } from '../lib/im'
@@ -103,6 +106,7 @@ export function WindowProvider({ roomId, children }: { roomId: string | null; ch
         if (cur) return opts?.quiet ? ws : ws.map((w) => (w.id === id ? { ...w, min: false, z } : w))
         const v = viewport()
         const box = clampBox(cascade(ws.length, { x: LIST_W + 8, w: v.w - LIST_W - 8, h: v.h }), v)
+        // Eight windows is the cap. The oldest drops off so the taskbar stays usable.
         return [...ws.slice(-7), { id, box, min: false, z, buzz: 0 }]
       })
       if (!opts?.quiet) focus(id)
@@ -148,7 +152,7 @@ export function WindowProvider({ roomId, children }: { roomId: string | null; ch
     [db, rooms, refreshRooms, open],
   )
 
-  // The URL (/app/r/:id) opens and focuses that window, so links and reloads land in the right IM.
+  // /app/r/:id opens and focuses that window, so a shared link or a reload lands in the right IM.
   useEffect(() => {
     if (!roomId || !roomsLoaded) return
     if (!rooms.some((r) => r.id === roomId)) {
@@ -174,7 +178,8 @@ export function WindowProvider({ roomId, children }: { roomId: string | null; ch
   }, [mobile, focused, wins, setVisible])
   useEffect(() => () => setVisible([]), [setVisible])
 
-  // Incoming IMs pop a window (desktop) and blip; a Buzz also shakes it.
+  // Incoming IMs pop a window on desktop and play a blip. A Buzz also shakes it.
+  // I don't steal focus if another window is already in front.
   const seen = useRef(new Set<string>())
   const roomsRef = useRef(rooms)
   const focusedRef = useRef(focused)
@@ -190,10 +195,12 @@ export function WindowProvider({ roomId, children }: { roomId: string | null; ch
         if (e.type !== 'msg') return
         const m = e.msg
         if (m.user_id === me.id || m.deleted_at || seen.current.has(m.id)) return
+        // Older than 30s means I just subscribed and caught up, or the tab
+        // woke up. Don't pop a window for history.
         if (Date.now() - +new Date(m.created_at) > 30_000) return
         seen.current.add(m.id)
         const room = roomsRef.current.find((r) => r.id === m.room_id)
-        // A room we haven't listed yet can only be a brand-new DM (public rooms are joined explicitly).
+        // A room I haven't listed yet can only be a brand-new DM. Public rooms are joined on purpose.
         const isDm = room ? room.kind === 'dm' : true
         if (!isDm) return
         const front = focusedRef.current === m.room_id && document.visibilityState === 'visible'

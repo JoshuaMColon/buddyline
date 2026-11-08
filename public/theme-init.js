@@ -1,5 +1,10 @@
-// Paint the saved skin before first render (external file so the CSP needs no inline hash).
-// The app writes `buddyline:paint` (resolved CSS variables); without it, fall back to the default light/dark preset.
+// Paint the saved skin before React loads, so the first frame isn't the
+// default theme flashing into theirs. This is an external file because
+// the CSP is script-src 'self' with no inline hash. The app writes
+// `buddyline:paint` (resolved CSS variables). Without it I fall back to
+// the light/dark preset. I only apply keys that look like CSS variables
+// or data attributes, so a tampered localStorage value can't set an
+// arbitrary style or attribute.
 try {
   var d = document.documentElement
   var p = JSON.parse(localStorage.getItem('buddyline:paint') || 'null')

@@ -1,8 +1,10 @@
-/** Pure helpers for the instant-messenger layer: buddy states, smileys, typing, windows. */
+/** Pure helpers for the instant-messenger layer: buddy states, smileys, typing, windows. No network. */
 import type { BuddyGroup, BuddyListData, BuddyState, MsgStyle, PresenceMeta, Profile, StyleColor } from './types'
 
 /* ------------------------------------------------------------------ screen names */
 
+// Same shape the profile trigger enforces. I check it on the form so
+// the person hears the rule before the round trip.
 export const SCREEN_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 _.-]{2,19}$/
 export function screenNameError(raw: string): string | null {
   const s = raw.trim()
@@ -23,8 +25,8 @@ export interface Live {
 }
 
 /**
- * Work out what a buddy is doing right now. Presence meta (live) wins over the stored profile;
- * bots are always signed on and keep whatever status their profile row says.
+ * What a buddy is doing right now. Live presence wins over the stored
+ * profile. A bot has no session, so I treat its profile row as always signed on.
  */
 export function buddyLive(p: Pick<Profile, 'is_bot' | 'status' | 'away_message' | 'idle_since'> | undefined, meta: PresenceMeta | undefined): Live {
   const src = meta ?? (p?.is_bot ? { status: p.status, away: p.away_message, idle_since: p.idle_since } : undefined)
@@ -52,8 +54,7 @@ export function lastSeenText(iso: string | null | undefined, now = Date.now()) {
   return `Signed off ${Math.floor(h / 24)}d ago`
 }
 
-/** The little line under a screen name in the buddy list. */
-/** `viewer` fills in %n/%t in an away message, the way AIM showed it to whoever was looking. */
+/** The line under a screen name. Away text runs through expandAway so %n and %t resolve for whoever is looking. */
 export function statusLine(live: Live, p: Pick<Profile, 'bio' | 'last_seen_at'> | undefined, now = Date.now(), viewer: string | null = null) {
   if (live.state === 'away') return live.away ? `Away: ${firstLine(expandAway(live.away, viewer, new Date(now)))}` : 'Away'
   if (live.state === 'idle' && live.idleSince) return idleText(live.idleSince, now)
@@ -121,9 +122,9 @@ export const DEFAULT_AWAYS = [
 ]
 
 /**
- * Expand %n (the person being answered) and %t (time) like old clients did. New auto responses
- * already have %n filled in by the database; this covers older ones. Pass null when the viewer is the
- * away person themself, so they never see their own name in "Hi %n".
+ * Expand %n (the person being answered) and %t (the time). New auto-replies
+ * already have %n filled in by the database; this covers older ones. Pass
+ * null when the viewer is the away person, so they never see their own name.
  */
 export function expandAway(msg: string, toName: string | null, now = new Date()) {
   return msg.replaceAll('%n', toName ?? 'there').replaceAll('%t', now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))
@@ -145,7 +146,10 @@ export function imTypingText(list: { name: string; state: TypingState }[]) {
   return `${names[0]}, ${names[1]} and ${names.length - 2} more are typing...`
 }
 
-/** Composer: what to broadcast for the given text and time since the last keystroke. */
+/**
+ * What the composer should broadcast. Keys moving is "typing"; a draft
+ * that sits for 3 seconds becomes "has entered text". Empty clears it.
+ */
 export function typingStateFor(text: string, sinceKeyMs: number): TypingState | null {
   if (!text.trim()) return null
   return sinceKeyMs >= 3000 ? 'entered' : 'typing'

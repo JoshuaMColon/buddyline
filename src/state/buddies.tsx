@@ -1,3 +1,6 @@
+// The buddy list is per user (RLS: owner = auth.uid()). I keep a local
+// copy, apply a move or removal immediately, then reload from
+// chat_buddy_list so the server stays the source of truth.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import * as api from '../lib/api'
 import { presenceDiff } from '../lib/im'
@@ -61,6 +64,7 @@ export function BuddyProvider({ children }: { children: ReactNode }) {
   )
   const remove = useCallback(
     async (id: string) => {
+      // Hide them immediately. The reload puts the row back if the RPC fails.
       setList((l) => ({ ...l, buddies: l.buddies.filter((b) => b.buddy !== id) }))
       try {
         await api.removeBuddy(db, id)
@@ -105,8 +109,8 @@ export function BuddyProvider({ children }: { children: ReactNode }) {
     play(on ? 'open' : 'close')
   }, [])
 
-  // Sign-on / sign-off: diff presence snapshots after the first sync, buddies only. A sign-off is
-  // held for a few seconds so a page refresh (leave + rejoin) doesn't slam the door.
+  // Sign-on / sign-off: diff presence snapshots after the first sync, buddies only.
+  // I hold a sign-off for a few seconds so a refresh (leave, then rejoin) doesn't slam the door.
   const prev = useRef<Set<string> | null>(null)
   const leaving = useRef(new Map<string, number>())
   const buddiesRef = useRef(buddies)

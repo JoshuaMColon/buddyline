@@ -1,6 +1,9 @@
 -- Aerogram: real-time chat in its own `chat` schema.
 -- Everything is members-only through RLS. Rows cascade away with the auth user, so the project's
 -- hourly guest cleanup (anonymous users older than a day) also removes /demo data.
+-- I don't put `chat` on the Data API allow-list. Clients reach it through
+-- the public.chat_* security_invoker views below, so these policies still
+-- run, plus the RPCs. anon has no usage on the schema.
 create schema if not exists chat;
 revoke all on schema chat from public, anon;
 grant usage on schema chat to authenticated, service_role;
@@ -64,11 +67,15 @@ create index messages_user_time on chat.messages (user_id, created_at desc);
 create index messages_attachment_path on chat.messages ((attachment ->> 'path')) where attachment is not null;
 
 -- ---------------------------------------------------------------- helpers
+-- security definer on purpose. Policies call this, and an invoker
+-- function would re-enter RLS on chat.members and recurse.
 create or replace function chat.is_member(r uuid)
 returns boolean language sql stable security definer set search_path = '' as $$
   select exists (select 1 from chat.members m where m.room_id = r and m.user_id = (select auth.uid()))
 $$;
 
+-- The anonymous-sign-in claim. I read it from the JWT Supabase already
+-- verified, not from a column the client could set.
 create or replace function chat.is_guest()
 returns boolean language sql stable set search_path = '' as $$
   select coalesce(((select auth.jwt()) ->> 'is_anonymous')::boolean, false)
@@ -110,6 +117,9 @@ returns text language sql immutable set search_path = '' as $$
 $$;
 
 -- ---------------------------------------------------------------- guards (client writes)
+-- `trusted` is the table owner: migrations, and Pip, which inserts as a
+-- security definer. A signed-in user is not. I overwrite their timestamps
+-- and reactions so a crafted insert can't forge them.
 create or replace function chat.guard_message()
 returns trigger language plpgsql set search_path = '' as $$
 declare
@@ -320,6 +330,9 @@ grant insert (id, room_id, user_id, body, attachment), update (body, deleted_at)
 grant all on public.chat_profiles, public.chat_rooms, public.chat_members, public.chat_messages to service_role;
 
 -- First visit: create my profile, join the seed rooms and get a welcome DM from Pip.
+-- Definer because the caller cannot insert a profile row, a DM membership
+-- for Pip, or Pip's welcome message under the policies above. auth.uid()
+-- is still the only id I will write.
 create or replace function public.chat_ensure_profile(p_name text default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
@@ -392,6 +405,8 @@ begin
   return rid;
 end $$;
 
+-- One DM per pair. dm_key sorts the two ids so A-opens-B and B-opens-A
+-- find the same room instead of creating a second one.
 create or replace function public.chat_open_dm(p_other uuid)
 returns uuid language plpgsql security definer set search_path = '' as $$
 declare
@@ -448,6 +463,8 @@ begin
 end $$;
 
 -- My rooms with a last-message preview and an unread count (capped at 99).
+-- Invoker on purpose. The unread subquery reads chat.messages as the
+-- caller, so RLS still hides rooms they don't belong to.
 create or replace function public.chat_my_rooms()
 returns table (id uuid, kind text, slug text, name text, topic text, is_seed boolean, last_message_at timestamptz,
   last_read_at timestamptz, unread integer, last_body text, last_user uuid, last_has_file boolean, last_deleted boolean, dm_user uuid)
@@ -467,6 +484,8 @@ language sql stable security invoker set search_path = '' as $$
 $$;
 
 -- Browse public rooms (with member counts) without being a member.
+-- Definer so I can count members of rooms the caller has not joined.
+-- The select only returns public-room metadata.
 create or replace function public.chat_public_rooms()
 returns table (id uuid, slug text, name text, topic text, is_seed boolean, members integer, last_message_at timestamptz, joined boolean)
 language sql stable security definer set search_path = '' as $$
@@ -485,6 +504,9 @@ grant execute on function public.chat_ensure_profile(text), public.chat_create_r
   public.chat_toggle_reaction(uuid, text), public.chat_my_rooms(), public.chat_public_rooms() to authenticated;
 
 -- ---------------------------------------------------------------- Realtime
+-- postgres_changes is authorized by table RLS, not by the policies below.
+-- Those cover private broadcast and presence: chat:lobby for anyone
+-- signed in, chat:room:<uuid> only for a member of that room.
 alter publication supabase_realtime add table chat.messages, chat.members, chat.rooms;
 
 create policy "Aerogram lobby and room channels: receive" on realtime.messages for select to authenticated
@@ -493,6 +515,9 @@ create policy "Aerogram lobby and room channels: send" on realtime.messages for 
   with check (realtime.messages.extension in ('broadcast', 'presence') and chat.can_use_topic((select realtime.topic())));
 
 -- ---------------------------------------------------------------- Storage
+-- Private bucket. The object name is <room>/<user>/<file>. can_upload
+-- checks membership, that the middle segment is auth.uid(), and a guest
+-- file cap. A crafted path can't land in someone else's folder.
 insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 values ('chat-files', 'chat-files', false, 5242880, array[
   'image/png', 'image/jpeg', 'image/webp', 'image/gif',
@@ -506,8 +531,9 @@ create policy "Aerogram: members upload to their room folder" on storage.objects
 create policy "Aerogram: authors delete their files" on storage.objects for delete to authenticated
   using (bucket_id = 'chat-files' and owner_id = (select auth.uid())::text);
 
--- The existing hourly sweep (cleanup-demo-files Edge Function) removes files through this list.
--- Add chat files from expired guests / deleted users, and orphans whose message is gone.
+-- The hourly cleanup-demo-files sweep (it lives outside this migration)
+-- removes files through this list. I include chat files whose owner is
+-- gone, whose anonymous user is almost a day old, or that no message still points at.
 create or replace function public.demo_files_to_purge(max_rows integer default 500)
 returns table (bucket_id text, name text)
 language sql stable security definer set search_path = '' as $$

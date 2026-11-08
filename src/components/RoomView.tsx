@@ -14,6 +14,7 @@ import { Btn, RoomStamp, Stamp, Tip, useToast } from './ui'
 
 const BOTTOM_SLACK = 120
 
+// Broadcasts can drop the "stopped typing" event. These expire the line on their own.
 const TTL: Record<TypingState, number> = { typing: 4500, entered: 13000 }
 
 interface Props {
@@ -25,6 +26,11 @@ interface Props {
   onBuzzed: () => void
 }
 
+/**
+ * One room: history, the composer, typing, and read receipts. The parent
+ * keys this by room id, so switching windows remounts it and I don't
+ * reset this state by hand.
+ */
 export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
   const { db, me, profiles, ensureProfiles, online, presence, subscribe, refreshRooms, patchRoom } = useChat()
   const { buddies, add: addBuddy } = useBuddies()
@@ -51,6 +57,8 @@ export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
     const [page, mem] = await Promise.all([api.messages(db, roomId), api.members(db, roomId)])
     setMsgs((cur) =>
       mergeMessages(
+        // Keep a send that hasn't landed yet. A reload in the middle of
+        // an upload shouldn't wipe the optimistic row.
         cur.filter((m) => m.pending || m.failed),
         page,
       ),
@@ -73,7 +81,8 @@ export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
     }
   }, [load, toast])
 
-  // Live events from the shared Postgres-changes channel.
+  // Live events from the shared Postgres-changes channel in ChatProvider.
+  // I filter to this room; other windows do the same with theirs.
   useEffect(
     () =>
       subscribe((e) => {
@@ -98,7 +107,9 @@ export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
     [subscribe, roomId, me.id, load],
   )
 
-  // Typing indicators: broadcast on a private per-room channel (members only, via RLS on realtime.messages).
+  // Typing is a broadcast, not a row. Private per-room channel; RLS on
+  // realtime.messages only lets a member of this room join it. self: false
+  // so I don't render my own "is typing".
   useEffect(() => {
     let dead = false
     let ch: RealtimeChannel | null = null
@@ -177,7 +188,8 @@ export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
     if (el.scrollTop < 200 && !loading) loadOlder()
   }
 
-  // Read receipts: move my marker when the newest letter is on screen and the tab is visible.
+  // Read receipts: move my marker when the newest message is on screen
+  // and the tab is visible. A background tab must not mark the room read.
   const myMember = members.find((m) => m.user_id === me.id)
   const newest = [...msgs].reverse().find((m) => !m.pending && !m.failed)
   useEffect(() => {
@@ -195,7 +207,8 @@ export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
     return () => document.removeEventListener('visibilitychange', go)
   }, [newest, myMember, atBottom, active, db, roomId, me.id, patchRoom])
 
-  // Sending: optimistic row with a client id; upload first, then insert; the realtime echo merges by id.
+  // Optimistic row first, with an id I generated. Upload, then insert
+  // that same id. The realtime echo merges onto this row instead of duplicating it.
   const deliver = useCallback(
     async (draft: Message, file: File | null) => {
       try {
@@ -217,6 +230,7 @@ export function RoomView({ room, active, onPeople, onLeft, onBuzzed }: Props) {
 
   const onSend = useCallback(
     (body: string, file: File | null, style: MsgStyle | null = null, kind: 'text' | 'buzz' = 'text') => {
+      // Client-generated so the insert and the optimistic row share an id.
       const id = crypto.randomUUID()
       const draft: Message = {
         id,

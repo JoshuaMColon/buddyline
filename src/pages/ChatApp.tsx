@@ -86,6 +86,8 @@ function Shell() {
     <RoomView key={r.id} room={r} active={active} onPeople={(room, members) => setPeople({ room, members })} onLeft={() => close(r.id)} onBuzzed={() => buzz(r.id)} />
   )
 
+  // Guests use the same messenger as an account. The banner is the only
+  // reminder that this screen name, and its IMs, disappear after a day.
   const banner = isGuest && (
     <div className="relative z-[60] flex shrink-0 items-center justify-center gap-3 bg-ink px-3 py-1.5 text-center text-xs text-paper">
       <span>
@@ -243,6 +245,9 @@ function Shell() {
 
 export function ChatApp({ roomId }: { roomId: string | null }) {
   const { ready, session, profile, profileError, signOut } = useAuth()
+  // The route itself is public. The gate is here: no session means
+  // /login, and I don't mount chat, buddy, or window state until the
+  // profile row exists. Guests and accounts take the same path.
   useEffect(() => {
     if (ready && !session) navigate('/login', true)
   }, [ready, session])
@@ -259,6 +264,7 @@ export function ChatApp({ roomId }: { roomId: string | null }) {
   return (
     <ChatProvider db={supabase} me={profile}>
       <BuddyProvider>
+        {/* A junk /app/r/<not-a-uuid> must not become a channel name. */}
         <WindowProvider roomId={isUuid(roomId) ? roomId : null}>
           <Shell />
         </WindowProvider>
